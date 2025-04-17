@@ -1,3 +1,4 @@
+from webserver import iniciar_web
 import discord
 from discord.ext import commands, tasks
 import requests
@@ -9,6 +10,8 @@ import time
 import re
 import aiohttp  # no topo do seu arquivo
 from dotenv import load_dotenv
+
+iniciar_web()
 
 checar_mortes_ativo = True  # Estado inicial: checar mortes está ativado
 
