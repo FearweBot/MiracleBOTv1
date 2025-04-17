@@ -10,6 +10,8 @@ import re
 import aiohttp  # no topo do seu arquivo
 from dotenv import load_dotenv
 
+checar_mortes_ativo = True  # Estado inicial: checar mortes está ativado
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -39,7 +41,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 def carregar_mortes():
     if not os.path.exists("mortes.json"):
-        return {}
+        return []
     with open("mortes.json", "r") as f:
         return json.load(f)
 
@@ -77,15 +79,20 @@ async def verificar_ultima_morte(nome):
             html = await response.text()
 
     soup = BeautifulSoup(html, "html.parser")
-    tabela = soup.find("table", {"class": "Table3"})
-    if not tabela:
-        return None
 
-    textos = tabela.get_text(separator="\n").split("\n")
-    mortes = [linha.strip() for linha in textos if "Died at Level" in linha]
-    return mortes[0] if mortes else None
+    # Procura por todas as tabelas
+    tabelas = soup.find_all("table", {"class": "TableContent"})
+    for tabela in tabelas:
+        titulo = tabela.find_previous("b")
+        if titulo and "Deaths" in titulo.text:
+            linhas = tabela.find_all("tr")[1:]  # Ignora o header
+            if not linhas:
+                return None
+            colunas = linhas[0].find_all("td")
+            if colunas and len(colunas) >= 1:
+                return colunas[0].text.strip()
 
-import aiohttp  # já deve estar no topo, mas confirme
+    return None
 
 async def verificar_status(nome):
     url = "https://miracle74.com/?subtopic=whoisonline"
@@ -124,20 +131,45 @@ async def verificar_status(nome):
     
     return None
 
-
 @tasks.loop(seconds=30)
 async def checar_mortes_globais():
+    if not checar_mortes_ativo:  # Se a checagem de mortes estiver desativada, retorna imediatamente
+        return
+
+    print("[DEBUG] Verificando mortes globais...")
     listas = carregar_listas()
     mortes_anteriores = carregar_mortes()
     canal = bot.get_channel(CANAL_MORTES_ID)
 
-    nomes_monitorados = set(nome for nomes in listas.values() for nome in nomes)
+    nomes_monitorados = set(normalizar_nome(nome) for nomes in listas.values() for nome in nomes)
+    print(f"[DEBUG] Nomes monitorados: {nomes_monitorados}")
 
-    for nome in nomes_monitorados:
-        nova_morte = await verificar_ultima_morte(nome)
-        if nova_morte and mortes_anteriores.get(nome) != nova_morte:
-            mortes_anteriores[nome] = nova_morte
-            await canal.send(f"☠️ **{nome} morreu!**\n{nova_morte}")
+    url = "https://miracle74.com/?subtopic=latestdeaths"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+
+    # Faz uma busca simples por texto
+    soup = BeautifulSoup(html, "html.parser")
+    texto_pagina = soup.get_text(separator="\n")
+
+    for linha in texto_pagina.splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
+
+        for nome_monitorado in nomes_monitorados:
+            if nome_monitorado in normalizar_nome(linha):
+                ultima_morte = mortes_anteriores.get(nome_monitorado)
+                
+                # Se a morte já foi registrada anteriormente, ignora
+                if ultima_morte == linha:
+                    print(f"[DEBUG] Morte já registrada para {nome_monitorado}: {linha}")
+                    continue  # Ignora e passa para a próxima linha de morte
+
+                print(f"[DEBUG] Nova morte detectada: {linha}")
+                mortes_anteriores[nome_monitorado] = linha
+                await canal.send(f"☠️ **{nome_monitorado} morreu!**\nMorte: {linha}")
 
     salvar_mortes(mortes_anteriores)
 
@@ -146,6 +178,28 @@ async def on_ready():
     print(f"Bot conectado como {bot.user}")
     checar_status.start()
     checar_mortes_globais.start()
+
+# (Comandos do bot... os comandos restantes aqui sem alterações)
+@bot.command()
+async def startdeaths(ctx):
+    global checar_mortes_ativo
+    if checar_mortes_ativo:
+        await ctx.send("A checagem de mortes já está ativada.")
+    else:
+        checar_mortes_ativo = True
+        checar_mortes_globais.start()  # Inicia o loop da checagem de mortes
+        await ctx.send("A checagem de mortes foi ativada.")
+
+@bot.command()
+async def stopdeaths(ctx):
+    global checar_mortes_ativo
+    if not checar_mortes_ativo:
+        await ctx.send("A checagem de mortes já está desativada.")
+    else:
+        checar_mortes_ativo = False
+        checar_mortes_globais.stop()  # Para o loop da checagem de mortes
+        await ctx.send("A checagem de mortes foi desativada.")
+
 
 @bot.command()
 async def addguild(ctx, link, *, lista):
