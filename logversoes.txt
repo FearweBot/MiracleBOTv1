@@ -1,0 +1,4 @@
+V1: Checa e organiza os personagens em uma lista pré-definida
+Reorganiza em ordem de lvl, inclui caracteres especiais como ' e -
+100% funcional
+--------------------------
