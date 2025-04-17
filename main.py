@@ -7,10 +7,15 @@ import os
 import unicodedata
 import time
 import re
+import aiohttp  # no topo do seu arquivo
 from dotenv import load_dotenv
 
-# Variável global para armazenar o tempo da última verificação
-ultima_atualizacao = time.time()
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID"))  # ID da guild (servidor)
+
+CANAL_MORTES_ID = int(os.getenv("CANAL_MORTES_ID"))
 
 VOCACOES = {
     "Royal Paladin": "[RP]",
@@ -23,59 +28,72 @@ VOCACOES = {
     "Sorcerer": "[S]"
 }
 
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-CANAL_ID = int(os.getenv("CANAL_ID", "0"))
-CANAL_MORTES_ID = int(os.getenv("CANAL_MORTES_ID", "0"))
-
-personagens_file = "personagens.json"
-mensagem_id_file = "mensagem_id.txt"
-mortes_file = "mortes.json"
-config_file = "config.json"
+listas_file = "listas.json"
+mensagens_file = "mensagens.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def carregar_personagens():
-    if not os.path.exists(personagens_file):
-        return []
-    with open(personagens_file, "r") as f:
-        return json.load(f)
-
-def salvar_personagens(personagens):
-    with open(personagens_file, "w") as f:
-        json.dump(personagens, f)
-
 def carregar_mortes():
-    if not os.path.exists(mortes_file):
+    if not os.path.exists("mortes.json"):
         return {}
-    with open(mortes_file, "r") as f:
+    with open("mortes.json", "r") as f:
         return json.load(f)
 
 def salvar_mortes(mortes):
-    with open(mortes_file, "w") as f:
+    with open("mortes.json", "w") as f:
         json.dump(mortes, f)
-
-def carregar_config():
-    if not os.path.exists(config_file):
-        return {"verificar_mortes": False}
-    with open(config_file, "r") as f:
-        return json.load(f)
-
-def salvar_config(config):
-    with open(config_file, "w") as f:
-        json.dump(config, f)
 
 def normalizar_nome(nome):
     return unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII").lower().strip()
 
-def verificar_status(nome):
-    url = "https://miracle74.com/?subtopic=whoisonline"
-    resposta = requests.get(url)
-    soup = BeautifulSoup(resposta.text, "html.parser")
+def carregar_listas():
+    if not os.path.exists(listas_file):
+        return {}
+    with open(listas_file, "r") as f:
+        return json.load(f)
 
+def salvar_listas(dados):
+    with open(listas_file, "w") as f:
+        json.dump(dados, f)
+
+def carregar_mensagens():
+    if not os.path.exists(mensagens_file):
+        return {}
+    with open(mensagens_file, "r") as f:
+        return json.load(f)
+
+def salvar_mensagens(dados):
+    with open(mensagens_file, "w") as f:
+        json.dump(dados, f)
+
+async def verificar_ultima_morte(nome):
+    url = f"https://miracle74.com/?subtopic=characters&name={nome}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+
+    soup = BeautifulSoup(html, "html.parser")
+    tabela = soup.find("table", {"class": "Table3"})
+    if not tabela:
+        return None
+
+    textos = tabela.get_text(separator="\n").split("\n")
+    mortes = [linha.strip() for linha in textos if "Died at Level" in linha]
+    return mortes[0] if mortes else None
+
+import aiohttp  # já deve estar no topo, mas confirme
+
+async def verificar_status(nome):
+    url = "https://miracle74.com/?subtopic=whoisonline"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.text()
+
+    soup = BeautifulSoup(html, "html.parser")
     tabelas = soup.find_all("table", {"class": "TableContent"})
     personagens_info = []
 
@@ -84,11 +102,11 @@ def verificar_status(nome):
         for linha in linhas:
             colunas = linha.find_all("td")
             if colunas and len(colunas) >= 4:
-                nome_completo = colunas[1].find("a").text.strip() if colunas[1].find("a") else ""
+                nome_completo = colunas[1].find("a").text.strip()
                 level = colunas[2].text.strip()
                 vocacao = colunas[3].text.strip()
 
-                match = re.match(r"([a-zA-ZÀ-ÿ\s]+)", nome_completo)
+                match = re.match(r"([a-zA-ZÀ-ÿ\s'\-]+)", nome_completo)
                 if match:
                     nome_personagem = match.group(1).strip()
                     if nome_personagem:
@@ -99,101 +117,224 @@ def verificar_status(nome):
                         })
 
     nome_normalizado = normalizar_nome(nome)
-
     for personagem in personagens_info:
         if normalizar_nome(personagem["nome"]) == nome_normalizado:
-            vocacao_abreviada = VOCACOES.get(personagem["vocacao"], personagem["vocacao"])
-            return f"{vocacao_abreviada} - {personagem['level']} 🟢"
-
+            voc_abrev = VOCACOES.get(personagem["vocacao"], personagem["vocacao"])
+            return f"{voc_abrev} - {personagem['level']} 🟢"
+    
     return None
+
+
+@tasks.loop(seconds=30)
+async def checar_mortes_globais():
+    listas = carregar_listas()
+    mortes_anteriores = carregar_mortes()
+    canal = bot.get_channel(CANAL_MORTES_ID)
+
+    nomes_monitorados = set(nome for nomes in listas.values() for nome in nomes)
+
+    for nome in nomes_monitorados:
+        nova_morte = await verificar_ultima_morte(nome)
+        if nova_morte and mortes_anteriores.get(nome) != nova_morte:
+            mortes_anteriores[nome] = nova_morte
+            await canal.send(f"☠️ **{nome} morreu!**\n{nova_morte}")
+
+    salvar_mortes(mortes_anteriores)
 
 @bot.event
 async def on_ready():
     print(f"Bot conectado como {bot.user}")
     checar_status.start()
+    checar_mortes_globais.start()
+
+@bot.command()
+async def addguild(ctx, link, *, lista):
+    listas = carregar_listas()
+    if lista not in listas:
+        await ctx.send(f"❌ Lista **{lista}** não existe.")
+        return
+
+    try:
+        resposta = requests.get(link)
+        soup = BeautifulSoup(resposta.text, "html.parser")
+        tabela = soup.find("table", {"class": "TableContent"})
+
+        if not tabela:
+            await ctx.send("❌ Tabela de guilda não encontrada.")
+            return
+
+        nomes_adicionados = []
+        linhas = tabela.find_all("tr")[1:]
+        for linha in linhas:
+            colunas = linha.find_all("td")
+            if colunas and len(colunas) > 1:
+                # Captura da segunda coluna (nome)
+                raw_nome = colunas[1].get_text(strip=True)
+
+                # Remove parênteses com conteúdo
+                nome = re.sub(r"\\s*\\(.*?\\)", "", raw_nome).strip()
+
+                if nome and nome not in listas[lista]:
+                    listas[lista].append(nome)
+                    nomes_adicionados.append(nome)
+
+        salvar_listas(listas)
+        await ctx.send(f"✅ {len(nomes_adicionados)} personagens adicionados à lista **{lista}**.")
+    except Exception as e:
+        await ctx.send(f"Erro ao adicionar guild: {e}")
+
+
+@bot.command()
+async def addlist(ctx, *, nome_lista):
+    guild = ctx.guild
+    listas = carregar_listas()
+    mensagens = carregar_mensagens()
+
+    if nome_lista in listas:
+        await ctx.send(f"A lista **{nome_lista}** já existe.")
+        return
+
+    canal = discord.utils.get(guild.text_channels, name=nome_lista.lower().replace(" ", "-"))
+    if not canal:
+        canal = await guild.create_text_channel(nome_lista.lower().replace(" ", "-"))
+
+    listas[nome_lista] = []
+    mensagens[nome_lista] = None
+    salvar_listas(listas)
+    salvar_mensagens(mensagens)
+    await ctx.send(f"✅ Lista **{nome_lista}** criada com sucesso!")
+
+@bot.command()
+async def removelist(ctx, *, nome_lista):
+    listas = carregar_listas()
+    mensagens = carregar_mensagens()
+
+    if nome_lista not in listas:
+        await ctx.send(f"❌ Lista **{nome_lista}** não encontrada.")
+        return
+
+    del listas[nome_lista]
+    salvar_listas(listas)
+
+    if nome_lista in mensagens:
+        del mensagens[nome_lista]
+        salvar_mensagens(mensagens)
+
+    canal = discord.utils.get(ctx.guild.text_channels, name=nome_lista.lower().replace(" ", "-"))
+    if canal:
+        await canal.delete()
+
+    await ctx.send(f"🗑️ Lista **{nome_lista}** e canal deletados com sucesso.")
+
+@bot.command()
+async def remove(ctx, *, args):
+    try:
+        nome, lista = args.rsplit(" ", 1)
+        lista = lista.strip()
+    except ValueError:
+        await ctx.send("❌ Use: `!remove <nome_personagem> <nome_lista>`")
+        return
+
+    listas = carregar_listas()
+    if lista not in listas:
+        await ctx.send(f"❌ Lista **{lista}** não encontrada.")
+        return
+
+    if nome not in listas[lista]:
+        await ctx.send(f"❌ O personagem **{nome}** não está na lista **{lista}**.")
+        return
+
+    listas[lista].remove(nome)
+    salvar_listas(listas)
+    await ctx.send(f"✅ Personagem **{nome}** removido da lista **{lista}**.")
+
+@bot.command()
+async def list(ctx, *, nome_lista):
+    listas = carregar_listas()
+    if nome_lista not in listas:
+        await ctx.send(f"❌ Lista **{nome_lista}** não encontrada.")
+        return
+
+    personagens = listas[nome_lista]
+    if not personagens:
+        await ctx.send(f"A lista **{nome_lista}** está vazia.")
+        return
+
+    msg = f"**📋 Personagens monitorados em `{nome_lista}`:**\n" + "\n".join(f"- {p}" for p in personagens)
+    await ctx.send(msg)
+
+@bot.command()
+async def commands(ctx):
+    msg = (
+        "**🤖 Comandos disponíveis:**\n"
+        "`!add list <nome_lista>` — cria uma nova lista\n"
+        "`!add <personagem> <lista>` — adiciona personagem à lista\n"
+        "`!remove list <nome_lista>` — apaga uma lista e o canal\n"
+        "`!remove <personagem> <lista>` — remove personagem da lista\n"
+        "`!list <lista>` — mostra todos os personagens (online e offline)\n"
+        "`!commands` — mostra este painel de ajuda"
+    )
+    await ctx.send(msg)
+
+@bot.command()
+async def add(ctx, *, args):
+    try:
+        nome, lista = args.rsplit(" ", 1)
+        lista_normalizada = lista.strip()
+    except ValueError:
+        await ctx.send("❌ Formato incorreto. Use: `!add <nome_personagem> <nome_lista>`")
+        return
+
+    listas = carregar_listas()
+    if lista_normalizada not in listas:
+        await ctx.send(f"❌ Lista **{lista_normalizada}** não existe.")
+        return
+
+    if nome in listas[lista_normalizada]:
+        await ctx.send(f"🔁 O personagem **{nome}** já está na lista **{lista_normalizada}**.")
+        return
+
+    listas[lista_normalizada].append(nome)
+    salvar_listas(listas)
+    await ctx.send(f"✅ Personagem **{nome}** adicionado à lista **{lista_normalizada}**.")
 
 @tasks.loop(seconds=30)
 async def checar_status():
-    personagens = carregar_personagens()
-    mortes_anteriores = carregar_mortes()
-    config = carregar_config()
-    status_msg = "**📋 Status dos personagens monitorados:**\n\n"
-    canal_status = bot.get_channel(CANAL_ID)
-    canal_mortes = bot.get_channel(CANAL_MORTES_ID)
-    resultado_geral = []  # Lista para armazenar status de todos os personagens
+    listas = carregar_listas()
+    mensagens = carregar_mensagens()
 
-    for nome in personagens:
-        status = verificar_status(nome)
-        if status:
-            match = re.search(r"(\d+)", status)
-            level = int(match.group(1)) if match else 0
-            resultado_geral.append({
-                "nome": nome,
-                "status": status,
-                "level": level
-            })
+    for nome_lista, personagens in listas.items():
+        status_msg = f"📋 **{nome_lista}** - Monitoramento de personagens online:\n\n"
+        resultados = []
 
-        if config.get("verificar_mortes"):
-            ultima_morte = verificar_ultima_morte(nome)
-            if ultima_morte and mortes_anteriores.get(nome) != ultima_morte:
-                mortes_anteriores[nome] = ultima_morte
-                await canal_mortes.send(f"☠️ **{nome} morreu!**\n{ultima_morte}")
+        for nome in personagens:
+            status = await verificar_status(nome)
+            if status:
+                match = re.search(r"(\d+)", status)
+                level = int(match.group(1)) if match else 0
+                resultados.append({"nome": nome, "status": status, "level": level})
 
-    # Ordenar por level (maior para menor)
-    resultado_ordenado = sorted(resultado_geral, key=lambda x: x["level"], reverse=True)
+        resultados = sorted(resultados, key=lambda x: x["level"], reverse=True)
+        if resultados:
+            status_msg += "\n".join(f"**{r['nome']}**: {r['status']}" for r in resultados)
+        else:
+            status_msg += "Nenhum personagem online no momento."
 
-    if resultado_ordenado:
-        status_msg += "\n".join(f"**{item['nome']}**: {item['status']}" for item in resultado_ordenado)
-    else:
-        status_msg = "**📋 Status dos personagens monitorados:**\nNenhum personagem online no momento."
+        guild = discord.utils.get(bot.guilds, id=GUILD_ID)
+        canal = discord.utils.get(guild.text_channels, name=nome_lista.lower().replace(" ", "-"))
+        if not canal:
+            continue
 
-
-    salvar_mortes(mortes_anteriores)
-
-    if not os.path.exists(mensagem_id_file):
-        mensagem = await canal_status.send(status_msg)
-        with open(mensagem_id_file, "w") as f:
-            f.write(str(mensagem.id))
-    else:
-        with open(mensagem_id_file, "r") as f:
-            msg_id = f.read().strip()
         try:
-            mensagem = await canal_status.fetch_message(int(msg_id))
-            await mensagem.edit(content=status_msg)
-        except:
-            mensagem = await canal_status.send(status_msg)
-            with open(mensagem_id_file, "w") as f:
-                f.write(str(mensagem.id))
-
-@bot.command(name="add")
-async def adicionar_personagem(ctx, *, nome: str):
-    personagens = carregar_personagens()
-    nome_normalizado = nome.strip()
-    if nome_normalizado in personagens:
-        await ctx.send(f"⚠️ O personagem **{nome_normalizado}** já está sendo monitorado.")
-        return
-    personagens.append(nome_normalizado)
-    salvar_personagens(personagens)
-    await ctx.send(f"✅ Personagem **{nome_normalizado}** adicionado à lista de monitoramento.")
-
-@bot.command(name="remove")
-async def remover_personagem(ctx, *, nome: str):
-    personagens = carregar_personagens()
-    nome_normalizado = nome.strip()
-    if nome_normalizado not in personagens:
-        await ctx.send(f"⚠️ O personagem **{nome_normalizado}** não está na lista.")
-        return
-    personagens.remove(nome_normalizado)
-    salvar_personagens(personagens)
-    await ctx.send(f"🗑️ Personagem **{nome_normalizado}** removido da lista.")
-
-@bot.command(name="list")
-async def listar_personagens(ctx):
-    personagens = carregar_personagens()
-    if not personagens:
-        await ctx.send("📭 Nenhum personagem está sendo monitorado no momento.")
-    else:
-        nomes = "\n".join([f"• {nome}" for nome in personagens])
-        await ctx.send(f"📋 Lista de personagens monitorados:\n{nomes}")
+            msg_id = mensagens.get(nome_lista)
+            if msg_id:
+                mensagem = await canal.fetch_message(int(msg_id))
+                await mensagem.edit(content=status_msg)
+            else:
+                mensagem = await canal.send(status_msg)
+                mensagens[nome_lista] = mensagem.id
+                salvar_mensagens(mensagens)
+        except Exception as e:
+            print(f"[ERRO]: {e}")
 
 bot.run(TOKEN)
