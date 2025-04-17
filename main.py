@@ -103,7 +103,7 @@ def verificar_status(nome):
     for personagem in personagens_info:
         if normalizar_nome(personagem["nome"]) == nome_normalizado:
             vocacao_abreviada = VOCACOES.get(personagem["vocacao"], personagem["vocacao"])
-            return f"{vocacao_abreviada} - {personagem['level']} "
+            return f"{vocacao_abreviada} - {personagem['level']} 🟢"
 
     return None
 
