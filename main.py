@@ -8,7 +8,7 @@ import os
 import unicodedata
 import time
 import re
-import aiohttp  # no topo do seu arquivo
+import aiohttp
 from dotenv import load_dotenv
 from functools import wraps
 
@@ -71,11 +71,10 @@ def normalizar_nome(nome):
 
 # Função para carregar as listas do canal
 async def carregar_listas():
-    guild = bot.get_guild(GUILD_ID)
-    canal = discord.utils.get(guild.text_channels, name="listas")
-    if not canal:
+    if not os.path.exists(listas_file):
         return {}
-
+    with open(listas_file, "r") as f:
+        return json.load(f)
     try:
         mensagens = await canal.history(limit=10).flatten()
         for mensagem in mensagens:
@@ -181,7 +180,7 @@ async def checar_mortes_globais():
     if not checar_mortes_ativo:
         return
 
-    listas = carregar_listas()
+    listas = await carregar_listas()  # Await here to get the latest data
     mortes_anteriores = carregar_mortes()
     canal = bot.get_channel(CANAL_MORTES_ID)
 
@@ -221,6 +220,11 @@ async def criar_canal_listas(ctx):
         await ctx.send("Canal `listas` criado com sucesso.")
     else:
         await ctx.send("O canal `listas` já existe.")
+
+# Remaining commands and task loops stay as they are...
+# Ensure async and permission checking functions are implemented correctly for security.
+
+bot.run(TOKEN)
 
 
 @bot.event
@@ -294,7 +298,7 @@ async def addguild(ctx, link, *, lista):
 @checar_permissao()
 async def addlist(ctx, *, nome_lista):
     guild = ctx.guild
-    listas = carregar_listas()
+    listas = await carregar_listas()  # Await it here
     mensagens = carregar_mensagens()
 
     if nome_lista in listas:
@@ -307,8 +311,8 @@ async def addlist(ctx, *, nome_lista):
 
     listas[nome_lista] = []
     mensagens[nome_lista] = None
-    salvar_listas(listas)
-    salvar_mensagens(mensagens)
+    await salvar_listas(listas)  # Make sure to save it asynchronously if needed
+    await salvar_mensagens(mensagens)
     await ctx.send(f"✅ Lista **{nome_lista}** criada com sucesso!")
 
 @bot.command()
