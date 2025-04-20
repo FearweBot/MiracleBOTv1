@@ -69,15 +69,47 @@ def salvar_mortes(mortes):
 def normalizar_nome(nome):
     return unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII").lower().strip()
 
-def carregar_listas():
-    if not os.path.exists(listas_file):
+# Função para carregar as listas do canal
+async def carregar_listas():
+    guild = bot.get_guild(GUILD_ID)
+    canal = discord.utils.get(guild.text_channels, name="listas")
+    if not canal:
         return {}
-    with open(listas_file, "r") as f:
-        return json.load(f)
 
-def salvar_listas(dados):
-    with open(listas_file, "w") as f:
-        json.dump(dados, f)
+    try:
+        mensagens = await canal.history(limit=10).flatten()
+        for mensagem in mensagens:
+            if mensagem.pinned:  # Verifica se a mensagem está fixada
+                try:
+                    return json.loads(mensagem.content)  # Tenta carregar como JSON
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        print(f"Erro ao carregar listas: {e}")
+    
+    return {}
+
+# Função para salvar as listas no canal
+async def salvar_listas(dados):
+    guild = bot.get_guild(GUILD_ID)
+    canal = discord.utils.get(guild.text_channels, name="listas")
+    if not canal:
+        return
+
+    try:
+        # Busca por uma mensagem fixa para atualizar
+        mensagens = await canal.history(limit=10).flatten()
+        for mensagem in mensagens:
+            if mensagem.pinned:
+                await mensagem.edit(content=json.dumps(dados, indent=4))  # Atualiza a mensagem fixa
+                return
+
+        # Se não houver mensagem fixa, envia uma nova
+        mensagem = await canal.send(content=json.dumps(dados, indent=4))
+        await mensagem.pin()  # Fixa a nova mensagem
+    except Exception as e:
+        print(f"Erro ao salvar listas no canal: {e}")
+
 
 def carregar_mensagens():
     if not os.path.exists(mensagens_file):
@@ -177,6 +209,19 @@ async def checar_mortes_globais():
                 await canal.send(f"☠️ **{nome_monitorado} morreu!**\nMorte: {linha}")
 
     salvar_mortes(mortes_anteriores)
+
+@bot.command()
+@checar_permissao()
+async def criar_canal_listas(ctx):
+    guild = ctx.guild
+    canal = discord.utils.get(guild.text_channels, name="listas")
+    if not canal:
+        canal = await guild.create_text_channel("listas")
+        await canal.send("Este canal será utilizado para armazenar as listas de monitoramento.")
+        await ctx.send("Canal `listas` criado com sucesso.")
+    else:
+        await ctx.send("O canal `listas` já existe.")
+
 
 @bot.event
 async def on_ready():
@@ -362,7 +407,7 @@ async def add(ctx, *, args):
         return
 
     listas[lista_normalizada].append(nome)
-    salvar_listas(listas)
+    await salvar_listas(listas)
     await ctx.send(f"✅ Personagem **{nome}** adicionado à lista **{lista_normalizada}**.")
 
 @tasks.loop(seconds=30)
