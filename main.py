@@ -3,6 +3,7 @@ import discord
 from discord.ext import commands, tasks
 import requests
 from bs4 import BeautifulSoup
+from discord.utils import get
 import json
 import os
 import unicodedata
@@ -10,7 +11,6 @@ import time
 import re
 import aiohttp  # no topo do seu arquivo
 from dotenv import load_dotenv
-from functools import wraps
 
 iniciar_web()
 
@@ -19,9 +19,16 @@ checar_mortes_ativo = True  # Estado inicial: checar mortes está ativado
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))  # ID da guild (servidor)
-
+GUILD_ID = int(os.getenv("GUILD_ID"))  # ID do servidor
+CANAL_PONTOS_ID = int(os.getenv("CANAL_PONTOS_ID"))  # Canal onde os pontos serão armazenados
+CANAL_RANKING_ID = int(os.getenv("CANAL_RANKING_ID"))  # Canal de ranking
 CANAL_MORTES_ID = int(os.getenv("CANAL_MORTES_ID"))
+
+
+# Configuração do bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
 
 VOCACOES = {
     "Royal Paladin": "[RP]",
@@ -40,25 +47,12 @@ mensagens_file = "mensagens.json"
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def checar_permissao():
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(ctx, *args, **kwargs):
-            role = discord.utils.get(ctx.author.roles, name="list")
-            if role is None:
-                await ctx.send("❌ Você não tem permissão para usar este comando.")
-                return
-            return await func(ctx, *args, **kwargs)
-        return wrapper
-    return decorator
-
 def carregar_mortes():
     if not os.path.exists("mortes.json"):
-        return {}
+        return []
     with open("mortes.json", "r") as f:
         return json.load(f)
 
@@ -96,11 +90,13 @@ async def verificar_ultima_morte(nome):
             html = await response.text()
 
     soup = BeautifulSoup(html, "html.parser")
+
+    # Procura por todas as tabelas
     tabelas = soup.find_all("table", {"class": "TableContent"})
     for tabela in tabelas:
         titulo = tabela.find_previous("b")
         if titulo and "Deaths" in titulo.text:
-            linhas = tabela.find_all("tr")[1:]
+            linhas = tabela.find_all("tr")[1:]  # Ignora o header
             if not linhas:
                 return None
             colunas = linhas[0].find_all("td")
@@ -127,6 +123,7 @@ async def verificar_status(nome):
                 nome_completo = colunas[1].find("a").text.strip()
                 level = colunas[2].text.strip()
                 vocacao = colunas[3].text.strip()
+
                 match = re.match(r"([a-zA-ZÀ-ÿ\s'\-]+)", nome_completo)
                 if match:
                     nome_personagem = match.group(1).strip()
@@ -142,24 +139,28 @@ async def verificar_status(nome):
         if normalizar_nome(personagem["nome"]) == nome_normalizado:
             voc_abrev = VOCACOES.get(personagem["vocacao"], personagem["vocacao"])
             return f"{voc_abrev} - {personagem['level']} 🟢"
+    
     return None
 
 @tasks.loop(seconds=30)
 async def checar_mortes_globais():
-    if not checar_mortes_ativo:
+    if not checar_mortes_ativo:  # Se a checagem de mortes estiver desativada, retorna imediatamente
         return
 
+    print("[DEBUG] Verificando mortes globais...")
     listas = carregar_listas()
     mortes_anteriores = carregar_mortes()
     canal = bot.get_channel(CANAL_MORTES_ID)
 
     nomes_monitorados = set(normalizar_nome(nome) for nomes in listas.values() for nome in nomes)
+    print(f"[DEBUG] Nomes monitorados: {nomes_monitorados}")
 
     url = "https://miracle74.com/?subtopic=latestdeaths"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             html = await response.text()
 
+    # Faz uma busca simples por texto
     soup = BeautifulSoup(html, "html.parser")
     texto_pagina = soup.get_text(separator="\n")
 
@@ -171,8 +172,13 @@ async def checar_mortes_globais():
         for nome_monitorado in nomes_monitorados:
             if nome_monitorado in normalizar_nome(linha):
                 ultima_morte = mortes_anteriores.get(nome_monitorado)
+                
+                # Se a morte já foi registrada anteriormente, ignora
                 if ultima_morte == linha:
-                    continue
+                    print(f"[DEBUG] Morte já registrada para {nome_monitorado}: {linha}")
+                    continue  # Ignora e passa para a próxima linha de morte
+
+                print(f"[DEBUG] Nova morte detectada: {linha}")
                 mortes_anteriores[nome_monitorado] = linha
                 await canal.send(f"☠️ **{nome_monitorado} morreu!**\nMorte: {linha}")
 
@@ -184,6 +190,7 @@ async def on_ready():
     checar_status.start()
     checar_mortes_globais.start()
 
+# (Comandos do bot... os comandos restantes aqui sem alterações)
 @bot.command()
 @checar_permissao()
 async def startdeaths(ctx):
@@ -192,7 +199,7 @@ async def startdeaths(ctx):
         await ctx.send("A checagem de mortes já está ativada.")
     else:
         checar_mortes_ativo = True
-        checar_mortes_globais.start()
+        checar_mortes_globais.start()  # Inicia o loop da checagem de mortes
         await ctx.send("A checagem de mortes foi ativada.")
 
 @bot.command()
@@ -203,10 +210,10 @@ async def stopdeaths(ctx):
         await ctx.send("A checagem de mortes já está desativada.")
     else:
         checar_mortes_ativo = False
-        checar_mortes_globais.stop()
+        checar_mortes_globais.stop()  # Para o loop da checagem de mortes
         await ctx.send("A checagem de mortes foi desativada.")
 
-# Continue aplicando @checar_permissao() a todos os outros comandos se desejar segurança completa
+
 @bot.command()
 @checar_permissao()
 async def addguild(ctx, link, *, lista):
@@ -403,5 +410,105 @@ async def checar_status():
                 salvar_mensagens(mensagens)
         except Exception as e:
             print(f"[ERRO]: {e}")
-            
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+async def obter_pontos():
+    """Obter pontos dos usuários do canal de pontos."""
+    guild = discord.utils.get(bot.guilds, id=GUILD_ID)
+    canal = discord.utils.get(guild.text_channels, id=CANAL_PONTOS_ID)
+
+    pontos = {}
+
+    if canal:
+        async for mensagem in canal.history(limit=100):  # Limitar para 100 mensagens mais recentes
+            if mensagem.author != bot.user:
+                # Cada mensagem segue o formato: "nome: pontos"
+                try:
+                    nome, pontos_usuario = mensagem.content.split(": ")
+                    pontos[nome] = int(pontos_usuario)
+                except ValueError:
+                    pass  # Se a mensagem não seguir o formato esperado, ignoramos
+
+    return pontos
+
+async def salvar_pontos():
+    """Salvar os pontos atualizados no canal de pontos."""
+    guild = discord.utils.get(bot.guilds, id=GUILD_ID)
+    canal = discord.utils.get(guild.text_channels, id=CANAL_PONTOS_ID)
+
+    if canal:
+        pontos = await obter_pontos()
+
+        # Deletar mensagens antigas de pontos
+        async for mensagem in canal.history(limit=100):
+            if mensagem.author == bot.user:
+                await mensagem.delete()
+
+        # Criar uma nova mensagem para cada usuário com seus pontos
+        for usuario, pontos_usuario in pontos.items():
+            await canal.send(f"{usuario}: {pontos_usuario}")
+
+async def atualizar_ranking():
+    """Atualizar o ranking no canal de ranking."""
+    pontos = await obter_pontos()
+    ranking = sorted(pontos.items(), key=lambda x: x[1], reverse=True)
+    ranking_msg = "🏆 **Ranking de Pontuação** 🏆\n\n"
+
+    for usuario, pontos_usuario in ranking:
+        ranking_msg += f"**{usuario}**: {pontos_usuario} pontos\n"
+
+    guild = discord.utils.get(bot.guilds, id=GUILD_ID)
+    canal = discord.utils.get(guild.text_channels, id=CANAL_RANKING_ID)
+    if canal:
+        try:
+            msg = await canal.send(ranking_msg)
+        except Exception as e:
+            print(f"Erro ao enviar mensagem no canal: {e}")
+
+@bot.command()
+async def adicionar_pontos(ctx, pontos: int, *, usuario: discord.Member):
+    """Adicionar pontos a um usuário."""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ Você não tem permissão para adicionar pontos.")
+        return
+
+    pontos_atual = await obter_pontos()
+    usuario_nome = usuario.name
+
+    # Adicionar pontos ao usuário
+    pontos_atual[usuario_nome] = pontos_atual.get(usuario_nome, 0) + pontos
+
+    # Atualizar os pontos no canal
+    await salvar_pontos()
+
+    await ctx.send(f"✅ {pontos} pontos adicionados ao usuário **{usuario_nome}**!")
+
+    # Verificar se o usuário atingiu 50 pontos e atribuir o cargo
+    if pontos_atual[usuario_nome] >= 50:
+        cargo_recruta = discord.utils.get(ctx.guild.roles, name="🍼 Recruta")
+        if cargo_recruta:
+            await usuario.add_roles(cargo_recruta)
+            await ctx.send(f"🎉 O usuário **{usuario_nome}** atingiu 50 pontos e ganhou o cargo **🍼 Recruta**!")
+
+    # Atualizar o ranking
+    await atualizar_ranking()
+
+@bot.command()
+async def ranking(ctx):
+    """Mostrar o ranking de pontos."""
+    pontos = await obter_pontos()
+    ranking = sorted(pontos.items(), key=lambda x: x[1], reverse=True)
+    ranking_msg = "🏆 **Ranking de Pontuação** 🏆\n\n"
+
+    for usuario, pontos_usuario in ranking:
+        ranking_msg += f"**{usuario}**: {pontos_usuario} pontos\n"
+
+    await ctx.send(ranking_msg)
+
+@bot.event
+async def on_ready():
+    """Evento disparado quando o bot estiver pronto."""
+    print(f"Bot conectado como {bot.user}")
+
 bot.run(TOKEN)
