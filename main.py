@@ -1,4 +1,4 @@
-import re
+ import re
  import aiohttp  # no topo do seu arquivo
  from dotenv import load_dotenv
  from functools import wraps
