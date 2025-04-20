@@ -8,7 +8,7 @@ import os
 import unicodedata
 import time
 import re
-import aiohttp
+import aiohttp  # no topo do seu arquivo
 from dotenv import load_dotenv
 from functools import wraps
 
@@ -69,46 +69,15 @@ def salvar_mortes(mortes):
 def normalizar_nome(nome):
     return unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII").lower().strip()
 
-# Função para carregar as listas do canal
-async def carregar_listas():
+def carregar_listas():
     if not os.path.exists(listas_file):
         return {}
     with open(listas_file, "r") as f:
         return json.load(f)
-    try:
-        mensagens = await canal.history(limit=10).flatten()
-        for mensagem in mensagens:
-            if mensagem.pinned:  # Verifica se a mensagem está fixada
-                try:
-                    return json.loads(mensagem.content)  # Tenta carregar como JSON
-                except json.JSONDecodeError:
-                    continue
-    except Exception as e:
-        print(f"Erro ao carregar listas: {e}")
-    
-    return {}
 
-# Função para salvar as listas no canal
-async def salvar_listas(dados):
-    guild = bot.get_guild(GUILD_ID)
-    canal = discord.utils.get(guild.text_channels, name="listas")
-    if not canal:
-        return
-
-    try:
-        # Busca por uma mensagem fixa para atualizar
-        mensagens = await canal.history(limit=10).flatten()
-        for mensagem in mensagens:
-            if mensagem.pinned:
-                await mensagem.edit(content=json.dumps(dados, indent=4))  # Atualiza a mensagem fixa
-                return
-
-        # Se não houver mensagem fixa, envia uma nova
-        mensagem = await canal.send(content=json.dumps(dados, indent=4))
-        await mensagem.pin()  # Fixa a nova mensagem
-    except Exception as e:
-        print(f"Erro ao salvar listas no canal: {e}")
-
+def salvar_listas(dados):
+    with open(listas_file, "w") as f:
+        json.dump(dados, f)
 
 def carregar_mensagens():
     if not os.path.exists(mensagens_file):
@@ -180,7 +149,7 @@ async def checar_mortes_globais():
     if not checar_mortes_ativo:
         return
 
-    listas = await carregar_listas()  # Await here to get the latest data
+    listas = carregar_listas()
     mortes_anteriores = carregar_mortes()
     canal = bot.get_channel(CANAL_MORTES_ID)
 
@@ -208,24 +177,6 @@ async def checar_mortes_globais():
                 await canal.send(f"☠️ **{nome_monitorado} morreu!**\nMorte: {linha}")
 
     salvar_mortes(mortes_anteriores)
-
-@bot.command()
-@checar_permissao()
-async def criar_canal_listas(ctx):
-    guild = ctx.guild
-    canal = discord.utils.get(guild.text_channels, name="listas")
-    if not canal:
-        canal = await guild.create_text_channel("listas")
-        await canal.send("Este canal será utilizado para armazenar as listas de monitoramento.")
-        await ctx.send("Canal `listas` criado com sucesso.")
-    else:
-        await ctx.send("O canal `listas` já existe.")
-
-# Remaining commands and task loops stay as they are...
-# Ensure async and permission checking functions are implemented correctly for security.
-
-bot.run(TOKEN)
-
 
 @bot.event
 async def on_ready():
@@ -298,7 +249,7 @@ async def addguild(ctx, link, *, lista):
 @checar_permissao()
 async def addlist(ctx, *, nome_lista):
     guild = ctx.guild
-    listas = await carregar_listas()  # Await it here
+    listas = carregar_listas()
     mensagens = carregar_mensagens()
 
     if nome_lista in listas:
@@ -311,8 +262,8 @@ async def addlist(ctx, *, nome_lista):
 
     listas[nome_lista] = []
     mensagens[nome_lista] = None
-    await salvar_listas(listas)  # Make sure to save it asynchronously if needed
-    await salvar_mensagens(mensagens)
+    salvar_listas(listas)
+    salvar_mensagens(mensagens)
     await ctx.send(f"✅ Lista **{nome_lista}** criada com sucesso!")
 
 @bot.command()
@@ -411,7 +362,7 @@ async def add(ctx, *, args):
         return
 
     listas[lista_normalizada].append(nome)
-    await salvar_listas(listas)
+    salvar_listas(listas)
     await ctx.send(f"✅ Personagem **{nome}** adicionado à lista **{lista_normalizada}**.")
 
 @tasks.loop(seconds=30)
