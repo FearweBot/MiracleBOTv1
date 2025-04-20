@@ -3,3 +3,4 @@ discord.py
 requests
 beautifulsoup4
 python-dotenv
+firebase-admin==6.1.0
